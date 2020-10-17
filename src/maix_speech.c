@@ -6,33 +6,34 @@
 #include "sysctl.h"
 #include "plic.h"
 #include "uarths.h"
-#include "sr_util/g_def.h"
 #include "i2s.h"
 #include "fpioa.h"
 #include "printf.h"
+
+#include <stdint.h>
+#include <stdlib.h>
+#include <stdio.h>
+#include <string.h>
+
+#include "sysctl.h"
+#include "plic.h"
+#include "uarths.h"
+#include "i2s.h"
+
 #include "sr_util/VAD.h"
 #include "sr_util/MFCC.h"
 #include "sr_util/DTW.h"
-#include "sr_util/flash.h"
 #include "sr_util/ADC.h"
 
-#define USART1_printk Serial.printk
-
-uint16_t VcBuf[atap_len];
 atap_tag atap_arg;
-valid_tag valid_voice[max_vc_con];
+uint16_t VcBuf[atap_len];
 v_ftr_tag ftr_curr;
+valid_tag valid_voice[max_vc_con];
 
-#define save_ok 0
-#define VAD_fail 1
-#define MFCC_fail 2
-#define Flash_fail 3
-
-#define FFT_N 512
-
-uint16_t rx_buf[FRAME_LEN];
-uint32_t g_rx_dma_buf[FRAME_LEN * 2];
-uint64_t fft_out_data[FFT_N / 2];
+uint32_t atap_tag_mid_val;       //语音段中值 相当于有符号的0值 用于短时过零率计算
+uint16_t atap_tag_n_thl = 10000; //噪声阈值，用于短时过零率计算
+uint16_t atap_tag_z_thl = 0;     //短时过零率阈值，超过此阈值，视为进入过渡段。
+uint32_t atap_tag_s_thl = 0;     //短时累加和阈值，超过此阈值，视为进入过渡段。
 
 static enum SrState {
     Init,
@@ -44,22 +45,50 @@ static enum SrState {
     Done,
 } sr_state = Init; // 识别状态 default 0
 
-uint32_t sr_result = -1;
-
-u32 atap_tag_mid_val;       //语音段中值 相当于有符号的0值 用于短时过零率计算
-u16 atap_tag_n_thl = 10000; //噪声阈值，用于短时过零率计算
-u16 atap_tag_z_thl;         //短时过零率阈值，超过此阈值，视为进入过渡段。
-u32 atap_tag_s_thl;         //短时累加和阈值，超过此阈值，视为进入过渡段。
-
 volatile uint32_t g_index = 0;
-volatile uint8_t uart_rec_flag;
-volatile uint32_t receive_char;
+volatile uint8_t i2s_start_flag = 0;
+uint16_t rx_buf[FRAME_LEN];
+uint32_t g_rx_dma_buf[FRAME_LEN * 2];
 volatile enum SrI2sFlag {
     NONE,
     FIRST,
     SECOND
 } i2s_recv_flag = NONE;
-volatile uint8_t i2s_start_flag = 0;
+
+#define ftr_size 10 * 4
+#define save_mask 12345
+v_ftr_tag ftr_save[ftr_size];
+
+#define sr_memset() for(uint16_t i = 0; i < ftr_size; i++) memset(&ftr_save[0], 0, sizeof(ftr_save[0]))
+
+uint8_t sr_save_ftr_mdl(v_ftr_tag *ftr, uint32_t model_num)
+{
+	if (model_num < ftr_size) {
+        ftr->save_sign = save_mask;
+        ftr_save[model_num] = *ftr;
+	}
+    return -1;
+}
+
+void sr_set_model(uint8_t model_num, const int16_t *voice_model, uint16_t frame_num)
+{
+    ftr_save[model_num].save_sign = save_mask;
+    ftr_save[model_num].frm_num = frame_num;
+    memcpy(ftr_save[model_num].mfcc_dat, voice_model, sizeof(ftr_save[model_num].mfcc_dat));
+}
+
+void sr_print_model(uint8_t model_num)
+{
+  printk("frm_num=%d\n", ftr_save[model_num].frm_num);
+  for (int i = 0; i < (vv_frm_max * mfcc_num); i++)
+  {
+    if (((i + 1) % 49) == 0) // next line
+      printk("%d,\n", ftr_save[model_num].mfcc_dat[i]);
+    else
+      printk("%d, ", ftr_save[model_num].mfcc_dat[i]);
+  }
+  printk("\nprint model ok!\n");
+}
 
 int sr_i2s_dma_irq(void *ctx)
 {
@@ -97,8 +126,8 @@ int sr_i2s_dma_irq(void *ctx)
     }
 
     uint16_t *v_dat = VcBuf;
-    static u16 frame_index;
-    const u16 num = atap_len / frame_mov;
+    static uint16_t frame_index;
+    const uint16_t num = atap_len / frame_mov;
     switch (sr_state)
     {
     case Init:
@@ -210,7 +239,34 @@ int sr_i2s_dma_irq(void *ctx)
     return 0;
 }
 
-int sr_begin()
+void sr_load(i2s_device_number_t device_num, dmac_channel_number_t channel_num, uint32_t priority)
+{
+    dmac_irq_register(channel_num, sr_i2s_dma_irq, NULL, priority);
+    i2s_receive_data_dma(device_num, &g_rx_dma_buf[0], frame_mov * 2, channel_num);
+
+    if (sr_state == Init)
+    {
+        g_index = 0;
+        i2s_recv_flag = NONE;
+        i2s_start_flag = 1;
+        sr_state = Idle;
+    }
+}
+
+void sr_free(i2s_device_number_t device_num)
+{
+    dmac_irq_unregister(device_num);
+    if (sr_state != Init)
+    {
+        g_index = 0;
+        i2s_recv_flag = NONE;
+        i2s_start_flag = 0;
+        sr_state = Init;
+        sr_memset();
+    }
+}
+
+void sr_begin()
 {
     //io_mux_init
     fpioa_set_function(20, FUNC_I2S0_IN_D0);
@@ -227,32 +283,18 @@ int sr_begin()
     i2s_set_sample_rate(I2S_DEVICE_0, 8000);
 
     dmac_init();
-    dmac_set_irq(DMAC_CHANNEL3, sr_i2s_dma_irq, NULL, 3);
-    i2s_receive_data_dma(I2S_DEVICE_0, &g_rx_dma_buf[0], frame_mov * 2, DMAC_CHANNEL3);
+
+    sr_load(I2S_DEVICE_0, DMAC_CHANNEL3, 3);
 
     /* Enable the machine interrupt */
     sysctl_enable_irq();
-    return 0;
 }
 
-int sr_record(uint8_t keyword_num, uint8_t model_num)
+int sr_record(uint8_t model_num)
 {
-    if (keyword_num > 10)
-        return -1;
-    if (model_num > 4)
-        return -2;
-
-    if (sr_state == Init)
+    if (sr_state == Done)
     {
-        g_index = 0;
-        i2s_recv_flag = NONE;
-        i2s_start_flag = 1;
-        sr_state = Idle;
-    }
-    else if (sr_state == Done)
-    {
-        uint32_t addr = ftr_start_addr + keyword_num * size_per_comm + model_num * size_per_ftr;
-        if (save_ftr_mdl(&ftr_curr, addr) == 0)
+        if (sr_save_ftr_mdl(&ftr_curr, model_num) == 0)
         {
             sr_state = Idle;
             return Done;
@@ -263,58 +305,37 @@ int sr_record(uint8_t keyword_num, uint8_t model_num)
 
 int sr_recognize()
 {
-    if (sr_state == Init)
+    if (sr_state == Done)
     {
-        g_index = 0;
-        i2s_recv_flag = NONE;
-        sr_state = Idle;
-        i2s_start_flag = 1;
-    }
-    else if (sr_state == Done)
-    {
-        u32 i = 0;
-        u16 min_comm = 0;
-        u32 min_dis = dis_max;
-        uint32_t cycle0 = read_csr(mcycle);
-        for (u32 ftr_addr = ftr_start_addr; ftr_addr < ftr_end_addr; ftr_addr += size_per_ftr)
+        int16_t min_comm = -1;
+        uint32_t min_dis = dis_max;
+        // uint32_t cycle0 = read_csr(mcycle);
+        for (uint32_t ftr_num = 0; ftr_num < ftr_size; ftr_num += 1)
         {
-            //  ftr_mdl=(v_ftr_tag*)ftr_addr;
-            v_ftr_tag *ftr_mdl = (v_ftr_tag *)(&ftr_save[ftr_addr / size_per_ftr]);
-            u32 cur_dis = ((ftr_mdl->save_sign) == save_mask) ? dtw(ftr_mdl, &ftr_curr) : dis_err;
+            //  ftr_mdl=(v_ftr_tag*)ftr_num;
+            v_ftr_tag *ftr_mdl = (v_ftr_tag *)(&ftr_save[ftr_num]);
             if ((ftr_mdl->save_sign) == save_mask)
             {
-                printk("no. %d, ftr_mdl->frm_num %d, ftr_mdl->save_mask %d, ", i + 1, ftr_mdl->frm_num, ftr_mdl->save_sign);
+                printk("no. %d, ftr_mdl->frm_num %d, ", ftr_num, ftr_mdl->frm_num);
+                
+                uint32_t cur_dis = dtw(ftr_mdl, &ftr_curr);
                 printk("cur_dis %d, ftr_curr.frm_num %d\n", cur_dis, ftr_curr.frm_num);
+            
+                if (cur_dis < min_dis)
+                {
+                    min_dis = cur_dis;
+                    min_comm = ftr_num;
+                    printk("min_comm: %d >\r\n", min_comm);
+                }
             }
-            if (cur_dis < min_dis)
-            {
-                min_dis = cur_dis;
-                min_comm = i + 1;
-                printk("min_comm: %d >\r\n", min_comm);
-            }
-            i++;
         }
-        uint32_t cycle1 = read_csr(mcycle) - cycle0;
-        printk("[INFO] recg cycle = 0x%08x\n", cycle1);
-        if (min_comm % 4)
-            min_comm = min_comm / ftr_per_comm + 1;
-        else
-            min_comm = min_comm / ftr_per_comm;
-        //USART1_printk("recg end ");
+        // uint32_t cycle1 = read_csr(mcycle) - cycle0;
+        // printk("[INFO] recg cycle = 0x%08x\n", cycle1);
+        //printk("recg end ");
         printk("min_comm: %d >\r\n", min_comm);
 
         sr_state = Idle;
         return Done;
     }
     return sr_state;
-}
-
-int sr_addVoiceModel(uint8_t keyword_num, uint8_t model_num, const int16_t *voice_model, uint16_t frame_num)
-{
-    ftr_save[keyword_num * 4 + model_num].save_sign = save_mask;
-    ftr_save[keyword_num * 4 + model_num].frm_num = frame_num;
-
-    for (int i = 0; i < (vv_frm_max * mfcc_num); i++)
-        ftr_save[keyword_num * 4 + model_num].mfcc_dat[i] = voice_model[i];
-    return 0;
 }

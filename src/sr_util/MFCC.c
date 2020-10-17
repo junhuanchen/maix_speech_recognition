@@ -3,7 +3,7 @@
 #include <stdlib.h>
 #include <stdio.h>
 #include <string.h>
-#include "g_def.h"
+
 #include <math.h>
 #include "ADC.h"
 #include "VAD.h"
@@ -15,13 +15,14 @@
 #include "fft.h"
 #include "FIR.h"
 
-void cr4_fft_1024_stm32(void *pssOUT, void *pssIN, u16 Nbin);
-void normalize(s16 *mfcc_p, u16 frm_num);
+void cr4_fft_1024_stm32(void *pssOUT, void *pssIN, uint16_t Nbin);
+void normalize(int16_t *mfcc_p, uint16_t frm_num);
 
-u32 fft_out[mfcc_fft_point];
-s16 fft_in[mfcc_fft_point];
+uint32_t fft_out[mfcc_fft_point];
+int16_t fft_in[mfcc_fft_point];
 
-extern uint64_t fft_out_data[512 / 2];
+#define FFT_N 512
+uint64_t fft_out_data[FFT_N / 2];
 extern void fft_dma_init(void);
 extern volatile fft_t *const fft;
 
@@ -86,10 +87,10 @@ void fft_sync_data(int16_t *data, uint8_t point, fft_data_t *fft_data)
     应该取其绝对值 即平方和的根
  */
 
-u32 *mfcc_fft(s16 *dat_buf, u16 buf_len)
+uint32_t *mfcc_fft(int16_t *dat_buf, uint16_t buf_len)
 {
-    u16 i;
-    s32 real, imag;
+    uint16_t i;
+    int32_t real, imag;
     fft_data_t output_data;
 
     if (buf_len > mfcc_fft_point)
@@ -108,13 +109,13 @@ u32 *mfcc_fft(s16 *dat_buf, u16 buf_len)
 
     for (i = 0; i < frq_max / 2; i++) {
         output_data = *(fft_data_t *)&fft_out_data[i];
-        imag = (s16)output_data.I1;
-        real = (s16)output_data.R1;
+        imag = (int16_t)output_data.I1;
+        real = (int16_t)output_data.R1;
         real = real*real+imag*imag;
         fft_out[2 * i] = sqrtf((float)real)*10;
 
-        imag = (s16)output_data.I2;
-        real = (s16)output_data.R2;
+        imag = (int16_t)output_data.I2;
+        real = (int16_t)output_data.R2;
 
         real = real*real+imag*imag;
         fft_out[2 * i + 1] = sqrtf((float)real)*10;
@@ -144,41 +145,41 @@ u32 *mfcc_fft(s16 *dat_buf, u16 buf_len)
 
 void get_mfcc(valid_tag *valid, v_ftr_tag *v_ftr, atap_tag *atap_arg)
 {
-    u16 *vc_dat;
-    u16 h, i;
-    u32 *frq_spct;          //频谱
-    s16 vc_temp[FRAME_LEN]; //语音暂存区
-    s32 temp;
+    uint16_t *vc_dat;
+    uint16_t h, i;
+    uint32_t *frq_spct;          //频谱
+    int16_t vc_temp[FRAME_LEN]; //语音暂存区
+    int32_t temp;
 
-    u32 pow_spct[tri_num];  //三角滤波器输出对数功率谱
-    u16 frm_con;
-    s16 *mfcc_p;
-    s8  *dct_p;
-    s32 mid;
-    u16 v_frm_num;
+    uint32_t pow_spct[tri_num];  //三角滤波器输出对数功率谱
+    uint16_t frm_con;
+    int16_t *mfcc_p;
+    int8_t  *dct_p;
+    int32_t mid;
+    uint16_t v_frm_num;
 
-    //USART1_printf("start=%d end=%d",(u32)(valid->start),(u32)(valid->end));
-    v_frm_num = (((u32)(valid->end)-(u32)(valid->start))/2-FRAME_LEN)/(FRAME_LEN-frame_mov)+1;
+    //USART1_printf("start=%d end=%d",(uint32_t)(valid->start),(uint32_t)(valid->end));
+    v_frm_num = (((uint32_t)(valid->end)-(uint32_t)(valid->start))/2-FRAME_LEN)/(FRAME_LEN-frame_mov)+1;
     if (v_frm_num > vv_frm_max) {
         printf("frm_num=%d ", v_frm_num);
         v_ftr->frm_num = 0;
     } else {
-        mid = (s32)atap_arg->mid_val;
+        mid = (int32_t)atap_arg->mid_val;
         mfcc_p = v_ftr->mfcc_dat;
         frm_con = 0;
         //low pass filter
-    //  for (vc_dat = (u16 *)(valid->start); vc_dat <= ((u16 *)(valid->end-FRAME_LEN)); vc_dat += 1) {
-    //      *vc_dat = (u16)(Fir(*vc_dat));
+    //  for (vc_dat = (uint16_t *)(valid->start); vc_dat <= ((uint16_t *)(valid->end-FRAME_LEN)); vc_dat += 1) {
+    //      *vc_dat = (uint16_t)(Fir(*vc_dat));
 
     //  }
-        for (vc_dat = (u16 *)(valid->start); vc_dat <= ((u16 *)(valid->end-FRAME_LEN)); vc_dat += (FRAME_LEN-frame_mov)) {
+        for (vc_dat = (uint16_t *)(valid->start); vc_dat <= ((uint16_t *)(valid->end-FRAME_LEN)); vc_dat += (FRAME_LEN-frame_mov)) {
             for (i = 0; i < FRAME_LEN; i++) {
                 //预加重
-            //  printf("vc_dat[%d]=%d ",i,((s32)(*(vc_dat+i))-mid));
-                temp = ((s32)(*(vc_dat+i))-mid) - hp_ratio(((s32)(*(vc_dat+i-1))-mid));
+            //  printf("vc_dat[%d]=%d ",i,((int32_t)(*(vc_dat+i))-mid));
+                temp = ((int32_t)(*(vc_dat+i))-mid) - hp_ratio(((int32_t)(*(vc_dat+i-1))-mid));
             //  printf("vc_hp[%d]=%d ",i,temp);
                 //加汉明窗 并放大10倍
-                vc_temp[i] = (s16)(temp*hamm[i]/(hamm_top/10));
+                vc_temp[i] = (int16_t)(temp*hamm[i]/(hamm_top/10));
             //  printf("vc_hm[%d]=%d\r\n",i,vc_temp[i]);
             }
 
@@ -212,16 +213,16 @@ void get_mfcc(valid_tag *valid, v_ftr_tag *v_ftr, atap_tag *atap_arg)
             //三角滤波器输出取对数
             for (h = 0; h < tri_num; h++) {
                 //USART1_printf("pow_spct[%d]=%d ",h,pow_spct[h]);
-                pow_spct[h] = (u32)(log(pow_spct[h])*100);//取对数后 乘100 提升数据有效位数
+                pow_spct[h] = (uint32_t)(log(pow_spct[h])*100);//取对数后 乘100 提升数据有效位数
                 //USART1_printf("%d\r\n",pow_spct[h]);
             }
 
             //反离散余弦变换
-            dct_p = (s8 *)dct_arg;
+            dct_p = (int8_t *)dct_arg;
             for (h = 0; h < mfcc_num; h++) {
                 mfcc_p[h] = 0;
                 for (i = 0; i < tri_num; i++)
-                    mfcc_p[h] += (((s32)pow_spct[i])*((s32)dct_p[i])/100);
+                    mfcc_p[h] += (((int32_t)pow_spct[i])*((int32_t)dct_p[i])/100);
                 //printf("%d,",mfcc_p[h]);
                 dct_p += tri_num;
             }
@@ -235,7 +236,7 @@ void get_mfcc(valid_tag *valid, v_ftr_tag *v_ftr, atap_tag *atap_arg)
     }
 }
 
-s16 avg(s16 *mfcc_p, u16 frm_num)
+int16_t avg(int16_t *mfcc_p, uint16_t frm_num)
 {
     int i, j;
     double sum = 0.0f;
@@ -246,10 +247,10 @@ s16 avg(s16 *mfcc_p, u16 frm_num)
             sum += mfcc_p[i * mfcc_num + j];
 //          printf("[%d, %d]%f %f ", i, j, sum, mfcc_p[i * mfcc_num + j]);
         }
-    return (s16)(sum / (frm_num * mfcc_num));
+    return (int16_t)(sum / (frm_num * mfcc_num));
 }
 
-s16 stdev(s16 *mfcc_p, s16 avg1, u16 frm_num)
+int16_t stdev(int16_t *mfcc_p, int16_t avg1, uint16_t frm_num)
 {
     int i, j;
     double sum = 0.0f;
@@ -257,14 +258,14 @@ s16 stdev(s16 *mfcc_p, s16 avg1, u16 frm_num)
     for (i = 0; i < frm_num; i++)
         for (j = 0; j < mfcc_num; j++)
             sum += (mfcc_p[i * mfcc_num + j] - avg1) * (mfcc_p[i * mfcc_num + j] - avg1);
-    return (s16)(sqrt(sum / (frm_num * mfcc_num)));
+    return (int16_t)(sqrt(sum / (frm_num * mfcc_num)));
 }
 
-void normalize(s16 *mfcc_p, u16 frm_num)
+void normalize(int16_t *mfcc_p, uint16_t frm_num)
 {
     int i, j;
-    s16 avg1 = avg(mfcc_p, frm_num);
-    s16 stdev1 = stdev(mfcc_p, avg1, frm_num);
+    int16_t avg1 = avg(mfcc_p, frm_num);
+    int16_t stdev1 = stdev(mfcc_p, avg1, frm_num);
 
     printf("avg1 = %d, stdev1 = %d\n", avg1, stdev1);
     for (i = 0; i < frm_num; i++)
